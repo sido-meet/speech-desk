@@ -13,6 +13,7 @@ import webbrowser
 import wave
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 import av
 import requests
@@ -420,6 +421,7 @@ async def stream_transcription(websocket: WebSocket):
         model = await asyncio.to_thread(get_model, model_id)
         recognizer = KaldiRecognizer(model, sample_rate)
         recognizer.SetWords(True)
+        vad = UtteranceDetector(sample_rate=sample_rate)
         await websocket.send_json({"type": "ready", "sample_rate": sample_rate})
 
         started = time.perf_counter()
@@ -427,6 +429,39 @@ async def stream_transcription(websocket: WebSocket):
         segments: list[dict] = []
         total_samples = 0
         last_partial = ""
+        display_text = ""
+        refine_lock = asyncio.Lock()
+        refine_task: Optional[asyncio.Task] = None
+        vad_segments_at_utterance_start = 0
+
+        def _compute_vosk_text(since_idx: int) -> str:
+            return "".join(
+                s.get("text", "").replace(" ", "") for s in segments[since_idx:]
+            )
+
+        def _merge_refinement(since_idx: int, qwen_text: str) -> str:
+            vosk_text = _compute_vosk_text(since_idx)
+            if vosk_text and display_text.endswith(vosk_text):
+                return display_text[: -len(vosk_text)] + qwen_text
+            return display_text + qwen_text
+
+        async def run_refinement(pcm: bytes, since_idx: int) -> None:
+            nonlocal display_text
+            try:
+                text = await asyncio.to_thread(refine_with_qwen, pcm, sample_rate)
+            except Exception as exc:
+                logger.warning("Qwen refinement failed: %s", exc)
+                return
+            if not text:
+                return
+            display_text = _merge_refinement(since_idx, text)
+            try:
+                await websocket.send_json({
+                    "type": "refined",
+                    "text": display_text + last_partial,
+                })
+            except RuntimeError:
+                pass  # socket already closed
 
         while True:
             message = await websocket.receive()
@@ -447,15 +482,32 @@ async def stream_transcription(websocket: WebSocket):
                     result = json.loads(recognizer.Result())
                     if result.get("text"):
                         segments.append(result)
-                    finalized = "".join(item.get("text", "").replace(" ", "") for item in segments)
-                    await websocket.send_json({"type": "result", "text": finalized, "segment": result})
+                    finalized = _compute_vosk_text(0)
+                    await websocket.send_json({
+                        "type": "result",
+                        "text": display_text + finalized,
+                        "segment": result,
+                    })
                     last_partial = ""
                 else:
                     partial = json.loads(recognizer.PartialResult()).get("partial", "").replace(" ", "")
                     if partial != last_partial:
-                        finalized = "".join(item.get("text", "").replace(" ", "") for item in segments)
-                        await websocket.send_json({"type": "partial", "text": finalized, "partial": partial})
+                        await websocket.send_json({
+                            "type": "partial",
+                            "text": display_text + _compute_vosk_text(0),
+                            "partial": partial,
+                        })
                         last_partial = partial
+
+                # VAD: detect end of utterance, schedule Qwen refinement.
+                completed = vad.feed(chunk)
+                if completed is not None and not refine_lock.locked():
+                    vad_segments_at_utterance_start = len(segments)
+
+                    async def _job(pcm=completed, idx=vad_segments_at_utterance_start):
+                        async with refine_lock:
+                            await run_refinement(pcm, idx)
+                    refine_task = asyncio.create_task(_job())
                 continue
 
             text_message = message.get("text")
@@ -468,10 +520,28 @@ async def stream_transcription(websocket: WebSocket):
             if event.get("event") != "stop":
                 continue
 
+            # Drain any in-flight refinement before finalizing.
+            if refine_task is not None:
+                try:
+                    await asyncio.wait_for(refine_task, timeout=10.0)
+                except (asyncio.TimeoutError, Exception):
+                    pass
+
+            # Drain remaining VAD buffer (user may have stopped mid-speech).
+            trailing = vad.flush()
+            if trailing is not None:
+                try:
+                    async with refine_lock:
+                        text = await asyncio.to_thread(refine_with_qwen, trailing, sample_rate)
+                        if text:
+                            display_text = _merge_refinement(vad_segments_at_utterance_start, text)
+                except Exception as exc:
+                    logger.warning("Final Qwen refinement failed: %s", exc)
+
             final = json.loads(recognizer.FinalResult())
             if final.get("text"):
                 segments.append(final)
-            text = "".join(item.get("text", "").replace(" ", "") for item in segments)
+            text = display_text + _compute_vosk_text(0)
             elapsed = time.perf_counter() - started
             duration = total_samples / sample_rate
             record_id = uuid.uuid4().hex
