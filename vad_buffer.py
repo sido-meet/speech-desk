@@ -22,8 +22,8 @@ except ImportError:  # Python 3.13+
 
 
 _FRAME_MS = 30
-_SILENCE_FRAMES_TO_FLUSH = 24  # 720 ms of continuous silence
-_MIN_SPEECH_FRAMES = 15  # 450 ms minimum speech to count as a real utterance
+_SILENCE_FRAMES_TO_FLUSH = 17  # 510 ms of continuous silence
+_MIN_SPEECH_FRAMES = 12  # 360 ms minimum speech to count as a real utterance
 _ENERGY_THRESHOLD_DB = -40.0
 _SAMPLE_RATES = (8000, 16000, 32000, 48000)
 _FRAME_BYTES = {
