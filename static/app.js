@@ -29,6 +29,7 @@ const state = {
   micAnalyser: null,
   micSourceNode: null,
   micAudioContext: null,
+  micSessionId: 0,
 };
 
 const ui = {
@@ -621,15 +622,22 @@ async function startMicRecording() {
     return;
   }
   state.micChunks = [];
-  state.micRecorder.ondataavailable = (event) => {
+  const sessionId = ++state.micSessionId;
+  const localRecorder = state.micRecorder;
+  localRecorder.ondataavailable = (event) => {
     if (event.data && event.data.size > 0) state.micChunks.push(event.data);
   };
-  state.micRecorder.onstop = () => {
-    const blob = new Blob(state.micChunks, { type: state.micRecorder.mimeType || "audio/webm" });
+  localRecorder.onstop = () => {
+    // If the user has already started a newer recording, discard this session's
+    // onstop entirely — otherwise we'd build a blob from the new session's
+    // chunks and submit a bogus request that returns "识别失败" right as the
+    // user thinks their next click is starting a new recording.
+    if (sessionId !== state.micSessionId) return;
+    const blob = new Blob(state.micChunks, { type: localRecorder.mimeType || "audio/webm" });
     state.micChunks = [];
-    submitMicRecording(blob);
+    submitMicRecording(blob, sessionId);
   };
-  state.micRecorder.start();
+  localRecorder.start();
   // Flag must be set before kicking off drawMicLiveWave, which early-returns if false.
   state.micRecording = true;
   state.micStarted = Date.now();
@@ -686,12 +694,14 @@ async function stopMicRecording() {
   ui.micHint.textContent = "已停止录音，正在上传并识别…";
 }
 
-async function submitMicRecording(blob) {
+async function submitMicRecording(blob, sessionId = state.micSessionId) {
   if (!blob || blob.size === 0) {
-    toast("录音为空", "error");
-    ui.micStatus.textContent = "准备录音";
-    ui.micHint.textContent = "点击开始录音，再次点击结束并使用所选模型识别";
-    drawMicIdleWave();
+    if (sessionId === state.micSessionId) {
+      toast("录音为空", "error");
+      ui.micStatus.textContent = "准备录音";
+      ui.micHint.textContent = "点击开始录音，再次点击结束并使用所选模型识别";
+      drawMicIdleWave();
+    }
     return;
   }
   setResultView("loading");
@@ -719,6 +729,7 @@ async function submitMicRecording(blob) {
     };
     state.history = [record, ...state.history.filter((item) => item.id !== record.id)];
     updateHistoryStats();
+    if (sessionId !== state.micSessionId) return; // 新一轮录音已开始：保留历史记录但不再覆盖结果区
     state.lastResult = record;
     showResult(record);
     showStreamAudio(record);
@@ -726,13 +737,14 @@ async function submitMicRecording(blob) {
     ui.micHint.textContent = "可以再次录音或切换其他模式";
     toast("录音识别已完成");
   } catch (error) {
+    if (sessionId !== state.micSessionId) return; // 新一轮录音已开始：忽略这次错误，避免误提示
     setResultView("empty");
     ui.resultSubtitle.textContent = "识别失败";
     ui.micStatus.textContent = "识别失败";
     ui.micHint.textContent = error.message || "请重试";
     toast(error.message || "识别失败", "error");
   } finally {
-    drawMicIdleWave();
+    if (sessionId === state.micSessionId) drawMicIdleWave();
   }
 }
 
