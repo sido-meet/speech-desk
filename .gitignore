@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.so
+
+# Virtual environments
+.venv/
+.venv-qwen/
+venv/
+env/
+
+# Models (downloaded separately, very large)
+models/
+models-qwen/
+
+# User data (recordings, history)
+data/audio/
+data/history.json
+
+# Work / temp / build artifacts
+work/
+*.log
+
+# Editor / IDE / tooling
+.agents/
+.codex/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Misc
+*.tmp

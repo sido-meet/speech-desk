@@ -1,0 +1,6 @@
+vosk==0.3.45
+sounddevice==0.5.5
+av==17.1.0
+fastapi==0.138.2
+uvicorn==0.49.0
+python-multipart==0.0.32
