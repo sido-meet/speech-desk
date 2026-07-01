@@ -19,8 +19,10 @@ models-qwen/
 data/audio/
 data/history.json
 
-# Work / temp / build artifacts
-work/
+# Work / temp / build artifacts (keep test scripts committed)
+work/*
+!work/test_*.py
+!work/test_*.sh
 *.log
 
 # Editor / IDE / tooling
