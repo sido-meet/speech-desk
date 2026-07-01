@@ -407,11 +407,15 @@ function handleStreamMessage(event) {
     drawLiveWave();
     return;
   }
-  if (message.type === "partial" || message.type === "result") {
+  if (message.type === "partial" || message.type === "result" || message.type === "refined") {
     const liveText = `${message.text || ""}${message.partial || ""}`;
     ui.resultText.textContent = liveText || "正在聆听…";
     ui.resultText.classList.toggle("empty-text", !liveText);
     ui.resultText.scrollTop = ui.resultText.scrollHeight;
+    if (message.type === "refined") {
+      ui.resultText.classList.add("refining");
+      setTimeout(() => ui.resultText.classList.remove("refining"), 400);
+    }
     return;
   }
   if (message.type === "complete") {
