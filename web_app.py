@@ -3,6 +3,7 @@ import asyncio
 import gc
 import io
 import json
+import logging
 import os
 import subprocess
 import threading
@@ -22,6 +23,10 @@ from fastapi.staticfiles import StaticFiles
 from vosk import KaldiRecognizer, Model, SetLogLevel
 
 from technical_normalizer import normalize_technical_text
+from vad_buffer import UtteranceDetector
+
+
+logger = logging.getLogger("vosk_desk.refine")
 
 
 ROOT = Path(__file__).resolve().parent
@@ -159,6 +164,26 @@ def transcribe_qwen(data: bytes, filename: str, content_type: str) -> dict:
             message = response.text
         raise RuntimeError(message or f"Qwen3-ASR worker 返回 {response.status_code}")
     return response.json()
+
+
+def build_wav_bytes(pcm: bytes, sample_rate: int) -> bytes:
+    """Wrap raw Int16-LE mono PCM into a complete WAV file in memory."""
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(sample_rate)
+        wav.writeframes(pcm)
+    return buffer.getvalue()
+
+
+def refine_with_qwen(pcm: bytes, sample_rate: int) -> str:
+    """Run Qwen3-ASR on a single utterance and return normalized text. Raises on failure."""
+    wav_bytes = build_wav_bytes(pcm, sample_rate)
+    result = transcribe_qwen(wav_bytes, "utterance.wav", "audio/wav")
+    raw = result.get("text", "").strip()
+    return normalize_technical_text(raw)
+
 
 
 def resolve_model(model_id: str) -> Path:
