@@ -558,13 +558,17 @@ function drawMicLiveWave() {
   const buf = analyser ? new Uint8Array(analyser.fftSize) : null;
   if (analyser) analyser.getByteTimeDomainData(buf);
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.lineWidth = 2;
-  ctx.strokeStyle = "#c84b3f";
+  const gradient = ctx.createLinearGradient(0, 0, canvas.width, 0);
+  gradient.addColorStop(0, "#6ac9b7");
+  gradient.addColorStop(0.5, "#087b69");
+  gradient.addColorStop(1, "#d98a2b");
+  ctx.strokeStyle = gradient;
+  ctx.lineWidth = 2.4;
   ctx.beginPath();
   const samples = buf ? buf.length : 0;
   for (let i = 0; i < samples; i++) {
     const x = (i / samples) * canvas.width;
-    const y = buf ? ((buf[i] - 128) / 128) * (canvas.height / 2) * 0.9 + canvas.height / 2 : canvas.height / 2;
+    const y = (buf[i] / 128) * canvas.height / 2;
     i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
   }
   ctx.stroke();
@@ -626,6 +630,11 @@ async function startMicRecording() {
     submitMicRecording(blob);
   };
   state.micRecorder.start();
+  // Flag must be set before kicking off drawMicLiveWave, which early-returns if false.
+  state.micRecording = true;
+  state.micStarted = Date.now();
+  ui.micButton.classList.add("recording");
+  ui.micButton.setAttribute("aria-label", "停止录音");
 
   // Visualization
   try {
@@ -638,11 +647,6 @@ async function startMicRecording() {
   } catch (error) {
     console.warn("Mic visualization unavailable:", error);
   }
-
-  state.micRecording = true;
-  state.micStarted = Date.now();
-  ui.micButton.classList.add("recording");
-  ui.micButton.setAttribute("aria-label", "停止录音");
   ui.micStatus.textContent = "正在录音";
   ui.micHint.textContent = "再次点击结束并使用所选模型识别";
   ui.micTimer.textContent = "00:00";
