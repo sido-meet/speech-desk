@@ -90,6 +90,7 @@
               <div><span class="step-number">01</span><div><h2>添加音频</h2><p>选择本地文件，或直接使用麦克风录制。</p></div></div>
               <div class="input-tabs" role="tablist">
                 <button class="input-tab active" data-mode="file" role="tab">上传文件</button>
+                <button class="input-tab" data-mode="mic" role="tab">录音</button>
                 <button class="input-tab" data-mode="record" role="tab">实时语音</button>
               </div>
             </div>
@@ -104,6 +105,17 @@
                 <span>或点击选择本地文件</span>
                 <small>支持 MP3、WAV、M4A、WebM、OGG、FLAC · 最大 200 MB</small>
               </button>
+            </div>
+
+            <div id="micMode" class="input-mode">
+              <div class="recorder">
+                <div class="record-status"><span id="micStatus">准备录音</span><strong id="micTimer">00:00</strong></div>
+                <canvas id="micWaveform" width="760" height="120" aria-label="录音波形"></canvas>
+                <div class="record-controls">
+                  <button id="micButton" class="record-button" type="button" aria-label="开始录音"><span></span></button>
+                  <p id="micHint">点击开始录音，再次点击结束并使用所选模型识别</p>
+                </div>
+              </div>
             </div>
 
             <div id="recordMode" class="input-mode">

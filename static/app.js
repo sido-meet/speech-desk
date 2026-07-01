@@ -19,6 +19,16 @@ const state = {
   timerId: null,
   animationId: null,
   previewUrl: null,
+  micRecording: false,
+  micStream: null,
+  micRecorder: null,
+  micChunks: [],
+  micStarted: 0,
+  micTimerId: null,
+  micAnimationId: null,
+  micAnalyser: null,
+  micSourceNode: null,
+  micAudioContext: null,
 };
 
 const ui = {
@@ -39,6 +49,11 @@ const ui = {
   historyEmpty: $("#historyEmpty"),
   toast: $("#toast"),
   canvas: $("#waveform"),
+  micButton: $("#micButton"),
+  micStatus: $("#micStatus"),
+  micTimer: $("#micTimer"),
+  micHint: $("#micHint"),
+  micCanvas: $("#micWaveform"),
 };
 
 function escapeHtml(value = "") {
@@ -249,11 +264,17 @@ function setInputMode(mode) {
     toast("请先结束当前实时识别", "error");
     return;
   }
+  if (state.micRecording && mode !== "mic") {
+    toast("请先结束当前录音", "error");
+    return;
+  }
   $$(".input-tab").forEach((button) => button.classList.toggle("active", button.dataset.mode === mode));
   $("#fileMode").classList.toggle("active", mode === "file");
+  $("#micMode").classList.toggle("active", mode === "mic");
   $("#recordMode").classList.toggle("active", mode === "record");
-  ui.transcribeButton.classList.toggle("hidden", mode === "record");
+  ui.transcribeButton.classList.toggle("hidden", mode !== "file");
   if (mode === "record") drawIdleWave();
+  if (mode === "mic" && !state.micRecording) drawMicIdleWave();
 }
 
 function drawIdleWave() {
@@ -340,7 +361,8 @@ async function toggleRecording() {
   }
   const selectedModel = state.models.find((model) => model.id === ui.modelSelect.value);
   if (selectedModel?.streaming === false) {
-    toast("Qwen3-ASR 本机版用于上传文件或整段录音；实时语音请切换 Vosk", "error");
+    toast("Qwen3-ASR 不支持实时流式，请使用「录音」tab", "error");
+    setInputMode("mic");
     return;
   }
 
@@ -508,6 +530,212 @@ function failStreaming(message) {
   toast(message, "error");
 }
 
+// ===== Mic recording (MediaRecorder → /api/transcribe) =====
+
+function drawMicIdleWave() {
+  if (state.micRecording) return;
+  const canvas = ui.micCanvas;
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.strokeStyle = "#c8dad4";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  for (let x = 0; x <= canvas.width; x += 5) {
+    const envelope = Math.exp(-Math.pow((x - canvas.width / 2) / 220, 2));
+    const y = canvas.height / 2 + Math.sin(x * 0.095) * 11 * envelope;
+    x === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+}
+
+function drawMicLiveWave() {
+  if (!state.micRecording) return;
+  const canvas = ui.micCanvas;
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  const analyser = state.micAnalyser;
+  const buf = analyser ? new Uint8Array(analyser.fftSize) : null;
+  if (analyser) analyser.getByteTimeDomainData(buf);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = "#c84b3f";
+  ctx.beginPath();
+  const samples = buf ? buf.length : 0;
+  for (let i = 0; i < samples; i++) {
+    const x = (i / samples) * canvas.width;
+    const y = buf ? ((buf[i] - 128) / 128) * (canvas.height / 2) * 0.9 + canvas.height / 2 : canvas.height / 2;
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+  state.micAnimationId = requestAnimationFrame(drawMicLiveWave);
+}
+
+function pickMicMimeType() {
+  const candidates = [
+    "audio/webm;codecs=opus",
+    "audio/webm",
+    "audio/ogg;codecs=opus",
+    "audio/mp4",
+  ];
+  for (const mime of candidates) {
+    if (window.MediaRecorder && MediaRecorder.isTypeSupported(mime)) return mime;
+  }
+  return "";
+}
+
+async function startMicRecording() {
+  if (state.micRecording) return;
+  if (!navigator.mediaDevices?.getUserMedia) {
+    toast("当前浏览器不支持麦克风录音", "error");
+    return;
+  }
+  if (!ui.modelSelect.value) {
+    toast("请先选择识别模型", "error");
+    return;
+  }
+  const model = state.models.find((item) => item.id === ui.modelSelect.value);
+  if (!model) {
+    toast("所选模型不可用", "error");
+    return;
+  }
+  try {
+    state.micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (error) {
+    toast(`无法访问麦克风：${error.message || error.name}`, "error");
+    return;
+  }
+  const mimeType = pickMicMimeType();
+  try {
+    state.micRecorder = mimeType
+      ? new MediaRecorder(state.micStream, { mimeType })
+      : new MediaRecorder(state.micStream);
+  } catch (error) {
+    toast(`MediaRecorder 初始化失败：${error.message || error.name}`, "error");
+    state.micStream.getTracks().forEach((t) => t.stop());
+    state.micStream = null;
+    return;
+  }
+  state.micChunks = [];
+  state.micRecorder.ondataavailable = (event) => {
+    if (event.data && event.data.size > 0) state.micChunks.push(event.data);
+  };
+  state.micRecorder.onstop = () => {
+    const blob = new Blob(state.micChunks, { type: state.micRecorder.mimeType || "audio/webm" });
+    state.micChunks = [];
+    submitMicRecording(blob);
+  };
+  state.micRecorder.start();
+
+  // Visualization
+  try {
+    state.micAudioContext = new (window.AudioContext || window.webkitAudioContext)();
+    state.micSourceNode = state.micAudioContext.createMediaStreamSource(state.micStream);
+    state.micAnalyser = state.micAudioContext.createAnalyser();
+    state.micAnalyser.fftSize = 1024;
+    state.micSourceNode.connect(state.micAnalyser);
+    drawMicLiveWave();
+  } catch (error) {
+    console.warn("Mic visualization unavailable:", error);
+  }
+
+  state.micRecording = true;
+  state.micStarted = Date.now();
+  ui.micButton.classList.add("recording");
+  ui.micButton.setAttribute("aria-label", "停止录音");
+  ui.micStatus.textContent = "正在录音";
+  ui.micHint.textContent = "再次点击结束并使用所选模型识别";
+  ui.micTimer.textContent = "00:00";
+  state.micTimerId = setInterval(() => {
+    ui.micTimer.textContent = formatDuration((Date.now() - state.micStarted) / 1000);
+  }, 250);
+}
+
+async function stopMicRecording() {
+  if (!state.micRecording) return;
+  if (state.micRecorder && state.micRecorder.state !== "inactive") {
+    state.micRecorder.stop();
+  }
+  state.micRecording = false;
+  cancelAnimationFrame(state.micAnimationId);
+  state.micAnimationId = null;
+  if (state.micTimerId) {
+    clearInterval(state.micTimerId);
+    state.micTimerId = null;
+  }
+  if (state.micStream) {
+    state.micStream.getTracks().forEach((t) => t.stop());
+    state.micStream = null;
+  }
+  if (state.micSourceNode) {
+    try { state.micSourceNode.disconnect(); } catch (e) {}
+    state.micSourceNode = null;
+  }
+  if (state.micAudioContext) {
+    state.micAudioContext.close().catch(() => {});
+    state.micAudioContext = null;
+  }
+  state.micAnalyser = null;
+  ui.micButton.classList.remove("recording");
+  ui.micButton.setAttribute("aria-label", "开始录音");
+  ui.micStatus.textContent = "正在识别";
+  ui.micHint.textContent = "已停止录音，正在上传并识别…";
+}
+
+async function submitMicRecording(blob) {
+  if (!blob || blob.size === 0) {
+    toast("录音为空", "error");
+    ui.micStatus.textContent = "准备录音";
+    ui.micHint.textContent = "点击开始录音，再次点击结束并使用所选模型识别";
+    drawMicIdleWave();
+    return;
+  }
+  setResultView("loading");
+  $("#loadingTitle").textContent = "正在识别录音…";
+  const filename = `mic-${Date.now()}.webm`;
+  const form = new FormData();
+  form.append("file", blob, filename);
+  form.append("model_id", ui.modelSelect.value);
+  const started = performance.now();
+  try {
+    const response = await fetch("/api/transcribe", { method: "POST", body: form });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || `请求失败 (${response.status})`);
+    const elapsed = (performance.now() - started) / 1000;
+    const record = {
+      ...data,
+      elapsed: data.elapsed ?? round2(elapsed),
+      source: data.source || filename,
+      model_id: data.model_id || ui.modelSelect.value,
+      model_name: data.model_name || (state.models.find((m) => m.id === ui.modelSelect.value)?.name || ""),
+      engine: data.engine || (ui.modelSelect.value === "qwen3-asr-0.6b" ? "qwen" : "vosk"),
+      audio_file: data.audio_file || null,
+      audio_type: data.audio_type || "audio/webm",
+      audio_url: data.audio_url || null,
+    };
+    state.history = [record, ...state.history.filter((item) => item.id !== record.id)];
+    updateHistoryStats();
+    state.lastResult = record;
+    showResult(record);
+    showStreamAudio(record);
+    ui.micStatus.textContent = "识别完成";
+    ui.micHint.textContent = "可以再次录音或切换其他模式";
+    toast("录音识别已完成");
+  } catch (error) {
+    setResultView("empty");
+    ui.resultSubtitle.textContent = "识别失败";
+    ui.micStatus.textContent = "识别失败";
+    ui.micHint.textContent = error.message || "请重试";
+    toast(error.message || "识别失败", "error");
+  } finally {
+    drawMicIdleWave();
+  }
+}
+
+function round2(value) {
+  return Math.round(value * 100) / 100;
+}
+
 function renderHistory() {
   const query = $("#historySearch").value.trim().toLowerCase();
   const records = state.history.filter((item) =>
@@ -628,7 +856,14 @@ function bindEvents() {
     localStorage.setItem("vosk-model", ui.modelSelect.value);
     toast(`已切换：${ui.modelSelect.options[ui.modelSelect.selectedIndex].text}`);
     const model = state.models.find((item) => item.id === ui.modelSelect.value);
-    if (model?.streaming === false && $("#recordMode").classList.contains("active")) setInputMode("file");
+    if (model?.streaming === false && $("#recordMode").classList.contains("active")) {
+      toast("Qwen3-ASR 不支持实时流式，已为你切到「录音」", "info");
+      setInputMode("mic");
+    }
+  });
+  ui.micButton?.addEventListener("click", () => {
+    if (state.micRecording) stopMicRecording();
+    else startMicRecording();
   });
   ui.dropZone.addEventListener("click", () => ui.fileInput.click());
   ui.fileInput.addEventListener("change", () => selectAudio(ui.fileInput.files[0]));
